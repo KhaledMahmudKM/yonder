@@ -1,0 +1,77 @@
+# Builds Yonder's downloads on GitHub (from DockerLab's workflow): Yonder.exe (the Windows app)
+# and a source .zip with the web interface built in. Push a tag such as v0.1.0 and they're attached
+# to a GitHub release of that name; "Run workflow" on the Actions tab builds them without a release.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-app:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Build the web interface
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Build Yonder.exe
+        run: |
+          pip install -r backend/requirements.txt pyinstaller
+          pyinstaller --noconfirm --distpath dist --workpath build tools/packaging/yonder.spec
+      - name: Check that it starts
+        shell: pwsh
+        run: |
+          $env:YONDER_OPEN_BROWSER = "0"; $env:YONDER_PORT = "8123"
+          $p = Start-Process dist\Yonder.exe -PassThru
+          Start-Sleep 15
+          $a = Invoke-RestMethod http://127.0.0.1:8123/api/about
+          "Started: Yonder $($a.version)"
+          Stop-Process $p.Id
+      - uses: actions/upload-artifact@v4
+        with: { name: Yonder-windows, path: dist/Yonder.exe }
+
+  release-zip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Build the web interface
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Make the release zip
+        run: |
+          V=$(cat VERSION)
+          mkdir -p out/yonder
+          git ls-files -z | grep -zvE '^(\.github|backend/static)/' | xargs -0 cp --parents -t out/yonder
+          cp -a backend/static out/yonder/backend/static
+          (cd out && zip -qr "../yonder-$V.zip" yonder)
+          echo "ZIP=yonder-$V.zip" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with: { name: Yonder-release-zip, path: "${{ env.ZIP }}" }
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows-app, release-zip]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          body: |
+            **Windows app:** download Yonder.exe and run it; it opens in your browser.
+            **Linux / macOS:** unzip the .zip, `pip install -r backend/requirements.txt`, then `python backend/main.py`.

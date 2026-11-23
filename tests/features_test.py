@@ -1,0 +1,71 @@
+"""0.3 features in the browser: About, Themes, recording and playback, saving the terminal's text. Run after reset.sh."""
+import os, time
+from playwright.sync_api import sync_playwright
+U = "http://127.0.0.1:8022/"
+S = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shots") + "/"
+os.makedirs(S, exist_ok=True)
+errors = []
+with sync_playwright() as p:
+    b = p.chromium.launch(executable_path=os.environ.get("CHROME") or None, args=["--no-sandbox"])
+    ctx = b.new_context(viewport={"width": 1400, "height": 860}, accept_downloads=True)
+    pg = ctx.new_page()
+    pg.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+    pg.goto(U); pg.wait_for_timeout(800)
+    if "Yonder" not in pg.title(): errors.append("title: " + pg.title())
+    # About
+    pg.get_by_role("button", name="Menu").click(); pg.screenshot(path=S + "30-menu.png")
+    pg.get_by_role("menuitem", name="About Yonder").click(); pg.wait_for_selector(".about-dlg")
+    if "Version 0.3" not in pg.inner_text(".about-dlg"): errors.append("about: no version")
+    pg.screenshot(path=S + "31-about.png")
+    pg.get_by_role("button", name="Third-party notices").click(); pg.wait_for_selector(".notices")
+    if "xterm" not in pg.inner_text(".notices"): errors.append("notices empty")
+    pg.get_by_role("button", name="Back").click(); pg.get_by_role("button", name="Close", exact=True).click()
+    # a terminal
+    pg.get_by_label("Quick connect: user@address[:port]").fill("alice@127.0.0.1:2222")
+    pg.get_by_role("button", name="Terminal", exact=True).first.click()
+    pg.get_by_role("button", name="Trust and connect").click()
+    pg.fill(".connect-dlg input[type=password]", "alicepw"); pg.get_by_role("button", name="Log in").click()
+    pg.wait_for_timeout(1500)
+    # Themes: try Dracula, cancel, then pick Nord
+    bg = lambda: pg.evaluate("getComputedStyle(document.querySelector('.termview:not(.is-hidden)')).getPropertyValue('--term-bg').trim()")
+    before = bg()
+    pg.get_by_role("button", name="Menu").click(); pg.get_by_role("menuitem", name="Themes…").click(); pg.wait_for_selector(".theme-grid")
+    pg.get_by_role("radio", name="Dracula").click(); pg.wait_for_timeout(200)
+    if bg().upper() != "#282A36": errors.append(f"theme preview not applied: {bg()}")
+    pg.screenshot(path=S + "32-themes.png")
+    pg.get_by_role("button", name="Cancel").click(); pg.wait_for_timeout(200)
+    if bg() != before: errors.append(f"cancel didn't restore: {bg()} vs {before}")
+    pg.get_by_role("button", name="Menu").click(); pg.get_by_role("menuitem", name="Themes…").click()
+    pg.get_by_role("radio", name="Light", exact=True).click()
+    n_light = pg.locator(".theme-card").count()
+    if n_light != 3: errors.append(f"light filter shows {n_light}")
+    pg.get_by_role("radio", name="All", exact=True).click()
+    pg.get_by_role("radio", name="Nord").click(); pg.get_by_role("button", name="Use Nord").click(); pg.wait_for_timeout(300)
+    if bg().upper() != "#2E3440": errors.append(f"nord not applied: {bg()}")
+    pg.get_by_role("button", name="Menu").click(); pg.get_by_role("menuitem", name="Settings…").click()
+    if "Nord" not in pg.inner_text(".settings-dlg"): errors.append("settings doesn't show the theme")
+    pg.screenshot(path=S + "33-settings.png")
+    pg.get_by_role("button", name="Done").click(); pg.wait_for_timeout(300)
+    # record
+    pg.get_by_role("button", name="Record", exact=True).click(); pg.wait_for_timeout(500)
+    if not pg.locator(".tab .tab-rec").count(): errors.append("no recording mark on the tab")
+    pg.keyboard.type("echo recorded-$((6*7)); ls --color=always /etc | head -5\n"); pg.wait_for_timeout(2200)
+    pg.screenshot(path=S + "34-recording.png")
+    pg.locator(".term-bar button.rec-on").click(); pg.wait_for_timeout(500)
+    pg.get_by_role("button", name="Show recordings").click(); pg.wait_for_selector(".rec-table")
+    pg.screenshot(path=S + "35-recordings.png")
+    pg.get_by_role("button", name="Play").first.click(); pg.wait_for_selector(".player-screen .xterm-rows"); pg.wait_for_timeout(3500)
+    shown = pg.inner_text(".player-screen .xterm-rows")
+    if "recorded-42" not in shown: errors.append("player didn't replay: " + shown[-200:])
+    pg.screenshot(path=S + "36-player.png")
+    print("focus in player:", pg.evaluate("document.activeElement.tagName + '.' + document.activeElement.className"))
+    pg.keyboard.press("Escape"); pg.wait_for_timeout(300)
+    print("after Escape, dialog open:", pg.locator(".player-dlg").count())
+    # save text
+    with pg.expect_download() as dl:
+        pg.get_by_role("button", name="Save text").click()
+    path = dl.value.path(); txt = open(path).read()
+    if "recorded-42" not in txt: errors.append("saved text misses the output")
+    if not dl.value.suggested_filename.endswith(".txt"): errors.append("saved name " + dl.value.suggested_filename)
+    b.close()
+print("ERRORS:", errors)
